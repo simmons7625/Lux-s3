@@ -64,7 +64,7 @@ class GATActor(nn.Module):
         self.fc = nn.Linear(hidden_dim * 4, output_dim)
 
     def forward(self, x):
-        x = F.relu(self.gat1(x))  # 完全グラフでは edge_index が不要
+        x = F.relu(self.gat1(x))
         x = F.relu(self.gat2(x))
         x = self.fc(x)
         return x
