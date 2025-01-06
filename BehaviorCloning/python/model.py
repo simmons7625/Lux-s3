@@ -4,10 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv
 
-def build_unit_graph(units, units_mask, team_points):
-    # 現時点で勝利しているチーム (0 or 1)
-    win_team = np.argmax(team_points)
-
+def build_unit_graph(units, units_mask):
     # 各チームでグラフを構成
     units_nodes = []
 
@@ -16,11 +13,10 @@ def build_unit_graph(units, units_mask, team_points):
         team_positions = units['position'][i][mask]
         team_energies = units['energy'][i][mask]
 
-        # ノード情報: [勝利フラグ, x座標, y座標, エネルギー]
-        team_nodes = np.zeros((len(team_positions), 4))
-        team_nodes[:, 0] = 1 if i == win_team else 0
-        team_nodes[:, 1:3] = team_positions
-        team_nodes[:, 3] = team_energies
+        # ノード情報: [x座標, y座標, エネルギー]
+        team_nodes = np.zeros((len(team_positions), 3))
+        team_nodes[:, :2] = team_positions
+        team_nodes[:, 2] = team_energies
         units_nodes.append(team_nodes)
         
     return units_nodes
@@ -38,7 +34,6 @@ class TileEmbedding(nn.Module):
 
 def build_tile_graph(tiles, units, units_mask):
     tile_embedder = TileEmbedding()
-
     # タイル埋め込みの取得
     embed_tile = tile_embedder(tiles)
 
