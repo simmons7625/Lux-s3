@@ -36,11 +36,11 @@ class TileEmbedding(nn.Module):
         output, _ = self.attention(tile, tile, tile)
         return F.relu(output)
 
-def build_tile_graph(tile, units, units_mask):
+def build_tile_graph(tiles, units, units_mask):
     tile_embedder = TileEmbedding()
 
     # タイル埋め込みの取得
-    embed_tile = tile_embedder(tile)
+    embed_tile = tile_embedder(tiles)
 
     # ユニットの現在地をインデキシング
     units_positions = units['position']
