@@ -144,7 +144,7 @@ for learn_step in progress_bar:
         gamma = gamma_base ** (NUM_STEPS - step)
         selected_action_values = action_values.gather(1, sample_actions[:, 0].unsqueeze(1)).squeeze(1)
         q = selected_action_values.sum()
-        rl_loss = ((1 - torch.tanh(torch.tensor(reward) + gamma * q)) ** 2).mean()
+        rl_loss = ((1 - torch.tanh(torch.tensor(reward) + gamma * q)) ** 2)
 
         total_bc_loss += bc_loss
         total_rl_loss += rl_loss
