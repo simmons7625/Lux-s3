@@ -4,3 +4,4 @@ episodes/
 .vscode/
 replays/
 *.json
+BehaviorCloning/python/logs/

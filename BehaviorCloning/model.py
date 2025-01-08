@@ -14,14 +14,14 @@ class TileEmbedding(nn.Module):
         return F.relu(output)
 
 class GATActor(nn.Module):
-    def __init__(self, input_dim=3+128, hidden_dim=256, output_dim=5):
+    def __init__(self, input_dim=3+128, hidden_dim=256, output_dim=6):
         super(GATActor, self).__init__()
         self.gat1 = GATConv(input_dim, hidden_dim, heads=4, concat=True, add_self_loops=True)
         self.gat2 = GATConv(hidden_dim * 4, hidden_dim, heads=4, concat=True, add_self_loops=True)
         self.fc = nn.Linear(hidden_dim * 4, output_dim)
 
-    def forward(self, x):
-        x = F.relu(self.gat1(x))
-        x = F.relu(self.gat2(x))
+    def forward(self, x, edge_index):
+        x = F.relu(self.gat1(x, edge_index))
+        x = F.relu(self.gat2(x, edge_index))
         x = self.fc(x)
         return F.softmax(x, dim=1), x
