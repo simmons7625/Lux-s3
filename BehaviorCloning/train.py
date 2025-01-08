@@ -10,7 +10,7 @@ from datetime import datetime
 from model import *
 
 # config
-alpha = 1
+alpha = 0.5
 beta = 1 - alpha
 gamma_base = 0.95
 NUM_LEARN = 10000
