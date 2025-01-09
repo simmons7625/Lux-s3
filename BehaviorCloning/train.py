@@ -10,7 +10,7 @@ from datetime import datetime
 from model import *
 
 # config
-alpha = 0.5
+alpha = 1
 beta = 1 - alpha
 gamma_base = 0.95
 NUM_LEARN = 10000
@@ -91,7 +91,7 @@ def build_unit_graph(units, units_mask, team, device='cuda'):
 # モデルとパラメータの初期化
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 imitator = GATActor().to(device)
-tile_embedder = TileEmbedding().to(device)
+tile_embedder = PositionalTileEmbedding().to(device)
 
 optimizer = torch.optim.Adam(
     list(imitator.parameters()) + list(tile_embedder.parameters()),
@@ -100,6 +100,7 @@ optimizer = torch.optim.Adam(
 
 # ログディレクトリをdatetimeで一意に生成
 log_dir = f'logs/{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+model_dir = f'models/{datetime.now().strftime("%Y%m%d_%H%M%S")}/'
 writer = SummaryWriter(log_dir=log_dir)
 
 # 学習ループ
@@ -143,8 +144,8 @@ for learn_step in progress_bar:
         reward = current_point_diff - previous_point_diff
         gamma = gamma_base ** (NUM_STEPS - step)
         selected_action_values = action_values.gather(1, sample_actions[:, 0].unsqueeze(1)).squeeze(1)
-        q = selected_action_values.sum()
-        rl_loss = ((1 - torch.tanh(torch.tensor(reward) + gamma * q)) ** 2)
+        value = torch.dot(selected_action_probs, selected_action_values)
+        rl_loss = ((1 - torch.tanh(torch.tensor(reward) + gamma * value)) ** 2)
 
         total_bc_loss += bc_loss
         total_rl_loss += rl_loss
@@ -163,7 +164,7 @@ for learn_step in progress_bar:
 
     # 1000回ごとにモデルを保存
     if (learn_step + 1) % 1000 == 0:
-        save_dir = f'models/{datetime.now().strftime("%Y%m%d_%H%M%S")}_step_{learn_step + 1}'
+        save_dir = model_dir + f'step_{learn_step + 1}'
         os.makedirs(save_dir, exist_ok=True)
         torch.save(tile_embedder.state_dict(), os.path.join(save_dir, 'tile_embedder.pth'))
         torch.save(imitator.state_dict(), os.path.join(save_dir, 'gnn_actor.pth'))
