@@ -10,12 +10,18 @@ from datetime import datetime
 from model import *
 
 # config
-alpha = 1
+alpha = 0.7
 beta = 1 - alpha
 gamma_base = 0.95
 NUM_LEARN = 10000
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 NUM_STEPS = 100
+
+submission_map = {
+    '41862933':'ry_andy_', 
+    '41863713':'ry_andy_', 
+    '41789980':"aDg4b"
+}
 
 # データ読み込み
 data_dir = 'dataset/'
@@ -39,7 +45,7 @@ def load_episode_json(file_pathes):
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        return data
+        return data, file_path
     except FileNotFoundError:
         print(f"Error: File {file_path} not found.")
         return None
@@ -91,11 +97,11 @@ def build_unit_graph(units, units_mask, team, device='cuda'):
 # モデルとパラメータの初期化
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 imitator = GATActor().to(device)
-tile_embedder = PositionalTileEmbedding().to(device)
+tile_embedder = TileEmbeddingCNN().to(device)
 
 optimizer = torch.optim.Adam(
     list(imitator.parameters()) + list(tile_embedder.parameters()),
-    lr=0.001
+    lr=1e-4
 )
 
 # ログディレクトリをdatetimeで一意に生成
@@ -110,14 +116,18 @@ for learn_step in progress_bar:
     total_rl_loss = 0
 
     for _ in range(BATCH_SIZE):
-        data = load_episode_json(file_pathes)
+        data, file_path = load_episode_json(file_pathes)
         if data is None: continue
-
-        winner = np.argmax(data['rewards'])
+        
+        for id, name in submission_map.items():
+            if file_path[8:16] == id:
+                team_name = name
+        team = 0 if data['info']['TeamNames'][0] == team_name else 1
+        win_flg = np.argmax(data['rewards']) == team
         ep = random.randint(0, 4)
-        step = random.randint(1, NUM_STEPS)
+        step = random.randint(50, NUM_STEPS)
 
-        step_log = data['steps'][ep * (NUM_STEPS + 1) + step][winner]
+        step_log = data['steps'][ep * (NUM_STEPS + 1) + step][team]
         obs = json.loads(step_log['observation']['obs'])
 
         units_mask = obs['units_mask']
@@ -125,27 +135,30 @@ for learn_step in progress_bar:
         map_features = obs['map_features']
         relic_nodes = obs['relic_nodes']
 
-        sample_actions = np.array(step_log['action'])[np.where(units_mask[winner])[0]]
+        sample_actions = np.array(step_log['action'])[np.where(units_mask[team])[0]]
         sample_actions = torch.tensor(sample_actions, dtype=torch.long, device=device)
         if len(sample_actions) == 0:
             continue
 
-        unit_nodes, units_edges = build_unit_graph(units, units_mask, winner, device=device)
-        tile_nodes = build_tile_graph(map_features, relic_nodes, units, winner, tile_embedder, device=device)
+        unit_nodes, units_edges = build_unit_graph(units, units_mask, team, device=device)
+        tile_nodes = build_tile_graph(map_features, relic_nodes, units, team, tile_embedder, device=device)
         input_nodes = torch.cat([unit_nodes, tile_nodes], dim=-1)
 
         action_probs, action_values = imitator.forward(input_nodes, units_edges)
         selected_action_probs = action_probs.gather(1, sample_actions[:, 0].unsqueeze(1)).squeeze(1)
-        bc_loss = -torch.log(selected_action_probs + 1e-8).mean()
+        bc_loss = -(torch.log(selected_action_probs + 1e-8).sum())
 
-        current_point_diff = obs['team_points'][winner] - obs['team_points'][1 - winner]
-        previous_obs = json.loads(data['steps'][ep * (NUM_STEPS + 1) + step][winner]['observation']['obs'])
-        previous_point_diff = 0 if step == 0 else previous_obs['team_points'][winner] - previous_obs['team_points'][1 - winner]
+        current_point_diff = obs['team_points'][team] - obs['team_points'][1 - team]
+        previous_obs = json.loads(data['steps'][ep * (NUM_STEPS + 1) + step][team]['observation']['obs'])
+        previous_point_diff = 0 if step == 0 else previous_obs['team_points'][team] - previous_obs['team_points'][1 - team]
         reward = current_point_diff - previous_point_diff
         gamma = gamma_base ** (NUM_STEPS - step)
         selected_action_values = action_values.gather(1, sample_actions[:, 0].unsqueeze(1)).squeeze(1)
         value = torch.dot(selected_action_probs, selected_action_values)
-        rl_loss = ((1 - torch.tanh(torch.tensor(reward) + gamma * value)) ** 2)
+        if win_flg:
+            rl_loss = ((1 - torch.tanh(torch.tensor(reward) + gamma * value)) ** 2)
+        else:
+            rl_loss = ((-1 - torch.tanh(torch.tensor(reward) + gamma * value)) ** 2)
 
         total_bc_loss += bc_loss
         total_rl_loss += rl_loss
@@ -155,7 +168,7 @@ for learn_step in progress_bar:
     avg_loss = alpha * avg_bc_loss + beta * avg_rl_loss
 
     optimizer.zero_grad()
-    avg_loss.backward()
+    avg_bc_loss.backward()
     optimizer.step()
 
     writer.add_scalar('Loss/Total', avg_loss.item(), learn_step)
