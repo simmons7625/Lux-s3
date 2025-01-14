@@ -5,7 +5,7 @@ import torch
 from model import *
 
 class Agent():
-    def __init__(self, player: str, env_cfg) -> None:
+    def __init__(self, player: str, env_cfg, model_dir) -> None:
         self.player = player
         self.opp_player = "player_1" if self.player == "player_0" else "player_0"
         self.team_id = 0 if self.player == "player_0" else 1
@@ -22,8 +22,8 @@ class Agent():
         self.tile_embedder = TileEmbeddingCNN()
 
         # モデルの重みをロード
-        imitator_path = 'models/20250109_213826/step_10000/gnn_actor.pth'
-        tile_embedder_path = 'models/20250109_213826/step_10000/tile_embedder.pth'
+        imitator_path = model_dir + 'gnn_actor.pth'
+        tile_embedder_path = model_dir + 'tile_embedder.pth'
 
         self.imitator.load_state_dict(torch.load(imitator_path, map_location=torch.device('cpu')))
         self.tile_embedder.load_state_dict(torch.load(tile_embedder_path, map_location=torch.device('cpu')))
@@ -77,82 +77,76 @@ class Agent():
         units = obs['units']
         map_features = obs['map_features']
         relic_nodes = obs['relic_nodes']
-        unit_positions = np.array(obs["units"]["position"][self.team_id]) # shape (max_units, 2)
-        unit_energys = np.array(obs["units"]["energy"][self.team_id]) # shape (max_units, 1)
-        observed_relic_node_positions = np.array(obs["relic_nodes"]) # shape (max_relic_nodes, 2)
-        observed_relic_nodes_mask = np.array(obs["relic_nodes_mask"]) # shape (max_relic_nodes, )
-    
+        unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape: (max_units, 2)
+        unit_energys = np.array(obs["units"]["energy"][self.team_id])  # shape: (max_units, 1)
+        observed_relic_node_positions = np.array(obs["relic_nodes"])  # shape: (max_relic_nodes, 2)
+        observed_relic_nodes_mask = np.array(obs["relic_nodes_mask"])  # shape: (max_relic_nodes,)
+        match_step = obs['match_steps']
+        
         # 初期化: アクションサイズ固定 (max_units, 3)
         max_units = self.env_cfg["max_units"]
         actions = np.zeros((max_units, 3), dtype=int)
+        
         # 行動可能なエージェントを特定
         mask = units_mask[self.team_id]
-        if step < 50:
-            # ids of units you can control at this timestep
-            available_unit_ids = np.where(mask)[0]
-            # visible relic nodes
-            visible_relic_node_ids = set(np.where(observed_relic_nodes_mask)[0])
+        available_unit_ids = np.where(mask)[0]
 
+        if match_step < 50:
+            # 初期探索と収集フェーズ
+            visible_relic_node_ids = set(np.where(observed_relic_nodes_mask)[0])
             for id in visible_relic_node_ids:
                 if id not in self.discovered_relic_nodes_ids:
                     self.discovered_relic_nodes_ids.add(id)
                     self.relic_node_positions.append(observed_relic_node_positions[id])
 
-            # unit ids range from 0 to max_units - 1
             for unit_id in available_unit_ids:
                 unit_pos = unit_positions[unit_id]
-                if len(self.relic_node_positions) > 0:
+                if self.relic_node_positions:
                     nearest_relic_node_position = self.relic_node_positions[0]
                     manhattan_distance = abs(unit_pos[0] - nearest_relic_node_position[0]) + abs(unit_pos[1] - nearest_relic_node_position[1])
                     
-                    # if close to the relic node we want to hover around it and hope to gain points
                     if manhattan_distance <= 4:
+                        # 近距離ならランダムに移動
                         random_direction = np.random.randint(0, 5)
                         actions[unit_id] = [random_direction, 0, 0]
                     else:
-                        # otherwise we want to move towards the relic node
+                        # 遠距離なら遺物に向かって移動
                         actions[unit_id] = [direction_to(unit_pos, nearest_relic_node_position), 0, 0]
                 else:
-                    # randomly explore by picking a random location on the map and moving there for about 20 steps
-                    if step % 20 == 0 or unit_id not in self.unit_explore_locations:
-                        rand_loc = (np.random.randint(0, self.env_cfg["map_width"]), np.random.randint(0, self.env_cfg["map_height"]))
-                        self.unit_explore_locations[unit_id] = rand_loc
+                    # ランダム探索
+                    rand_loc = (np.random.randint(0, self.env_cfg["map_width"]), np.random.randint(0, self.env_cfg["map_height"]))
+                    self.unit_explore_locations[unit_id] = rand_loc
                     actions[unit_id] = [direction_to(unit_pos, self.unit_explore_locations[unit_id]), 0, 0]
-        elif len(np.where(mask)[0]) > 0:
-            # グラフ構築
-            unit_nodes, units_edges = self.build_unit_graph(units, units_mask, self.team_id)
-            tile_nodes = self.build_tile_graph(map_features, relic_nodes, units, self.team_id, self.tile_embedder)
-            input_nodes = torch.cat([unit_nodes, tile_nodes], dim=-1)
+        else:
+            # 後半フェーズ: モデルを利用して行動を選択
+            if available_unit_ids.size > 0:
+                unit_nodes, units_edges = self.build_unit_graph(units, units_mask, self.team_id)
+                tile_nodes = self.build_tile_graph(map_features, relic_nodes, units, self.team_id, self.tile_embedder)
+                input_nodes = torch.cat([unit_nodes, tile_nodes], dim=-1)
 
-            # モデルの予測
-            action_probs, action_values = self.imitator.forward(input_nodes, units_edges)
+                action_probs, action_values = self.imitator.forward(input_nodes, units_edges)
+                selected_actions = torch.multinomial(action_probs, num_samples=1)
+                selected_actions = torch.cat([selected_actions, torch.zeros(selected_actions.size(0), 2)], dim=-1)
 
-            # アクション選択 (N, 3)
-            selected_actions = torch.multinomial(action_probs, num_samples=1).unsqueeze(-1)
-            selected_actions = torch.cat([selected_actions, torch.zeros(selected_actions.size(0), 2)], dim=-1)  # (N, 3)
+                for idx, active_idx in enumerate(available_unit_ids):
+                    actions[active_idx] = selected_actions[idx].cpu().numpy()
 
-            # 攻撃アクション (id=5) 用の設定
-            sap_range = self.env_cfg['unit_sap_range']
-            adversal_pos = torch.tensor(obs['units']['position'][1 - self.team_id])  # 敵の位置をテンソルに変換
+        # 攻撃アクション (id=5) の処理
+        sap_range = self.env_cfg['unit_sap_range']
+        adversal_pos = torch.tensor(obs['units']['position'][1 - self.team_id], dtype=torch.float32)  # 敵位置
 
-            # 攻撃アクション (id=5) の処理
-            attack_action_mask = selected_actions[:, 0] == 5  # 攻撃アクションを選択したエージェント
+        if adversal_pos.shape[0] > 0:  # 敵が存在する場合のみ処理
+            attack_action_mask = actions[:, 0] == 5
             if attack_action_mask.any():
-                # 攻撃位置の相対座標を計算
-                unit_positions = torch.tensor(units['position'][self.team_id], dtype=torch.float32)  # 自チームの位置をテンソルに変換
-                relative_positions = adversal_pos - unit_positions  # 敵との相対座標
+                unit_positions_tensor = torch.tensor(unit_positions, dtype=torch.float32)  # 自チームユニット位置
+                relative_positions = adversal_pos.unsqueeze(1) - unit_positions_tensor.unsqueeze(0)  # shape: (num_enemies, num_units, 2)
+                distances = torch.norm(relative_positions, dim=-1)  # shape: (num_enemies, num_units)
+                nearest_enemy_indices = torch.argmin(distances, dim=0)  # 最近傍の敵
 
-                # 攻撃範囲内に制限
-                relative_positions = torch.clamp(relative_positions, min=-sap_range, max=sap_range)
+                nearest_relative_positions = relative_positions[nearest_enemy_indices, torch.arange(unit_positions_tensor.size(0))]  # shape: (num_units, 2)
+                nearest_relative_positions = torch.clamp(nearest_relative_positions, min=-sap_range, max=sap_range)
+                actions[attack_action_mask, 1:3] = nearest_relative_positions[attack_action_mask]
 
-                # 攻撃アクションのエージェントに相対座標を割り当て
-                selected_actions[attack_action_mask, 1:3] = relative_positions[attack_action_mask].to(selected_actions.dtype)
-
-            # 行動可能なエージェントのみにアクションを設定
-            active_indices = torch.where(torch.tensor(mask))[0]  # 行動可能なユニットのインデックス
-            for idx, active_idx in enumerate(active_indices):
-                actions[active_idx] = selected_actions[idx].cpu().numpy()
-                
         return actions
 
 
