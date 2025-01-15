@@ -11,12 +11,12 @@ from model import *
 
 # config
 gamma_base = 0.95
-NUM_LEARN = 10000
-BATCH_SIZE = 64
+NUM_LEARN = 1000
+BATCH_SIZE = 32
 NUM_STEPS = 100
 
 # データ読み込み
-data_dir = 'dataset/test/20250110_165639/'
+data_dir = 'dataset/test/20250115_020417/'
 
 # ファイルパスリストを生成
 def generate_file_paths(data_dir):
@@ -56,7 +56,7 @@ def build_tile_graph(map_features, relic_nodes, units, units_mask, sensor_range,
     adversal_pos = np.array(units['position'][1-team])[adversal_indices]
     for pos in adversal_pos:
         x, y = pos
-        if x == -1 or y == -1: continue
+        # if x == -1 or y == -1: continue
         adversal_map[x, y] += 1
 
     tiles = np.concatenate([tiles, adversal_map[..., np.newaxis]], axis=-1)
@@ -67,7 +67,7 @@ def build_tile_graph(map_features, relic_nodes, units, units_mask, sensor_range,
     team_pos = np.array(units['position'][team])[team_indices]
     for pos in team_pos:
         x, y = pos
-        if x == -1 or y == -1: continue
+        # if x == -1 or y == -1: continue
         tile_features.append(embed_tile[x, y, :])
 
     return torch.stack(tile_features).to(device)
@@ -138,7 +138,9 @@ for learn_step in progress_bar:
         step = random.randint(50, NUM_STEPS)
         sensor_range = data['params']['unit_sensor_range']
 
-        win_flg = data['observations'][ep * (NUM_STEPS + 1) + (NUM_STEPS + 1)]['team_wins']
+        current_match_result = np.array(data['observations'][ep * (NUM_STEPS + 1) + (NUM_STEPS + 1)]['team_wins'])
+        previous_match_result = np.array(data['observations'][(ep-1)* (NUM_STEPS + 1) + (NUM_STEPS + 1)]['team_wins'])
+        win_flg = (current_match_result - previous_match_result)[team] == 1
         obs = data['observations'][ep * (NUM_STEPS + 1) + step]
         action = data['actions'][ep * (NUM_STEPS + 1) + step][f'player_{team}']
 
@@ -166,11 +168,13 @@ for learn_step in progress_bar:
         gamma = gamma_base ** (NUM_STEPS - step)
         selected_action_values = action_values.gather(1, sample_actions[:, 0].unsqueeze(1)).squeeze(1)
         value = torch.dot(selected_action_probs, selected_action_values)
+        pred = torch.tensor(reward) + gamma * value
         if win_flg:
-            rl_loss = ((100 - torch.tensor(reward) + gamma * value) ** 2)
+            target = 100
         else:
-            rl_loss = ((-100 - torch.tensor(reward) + gamma * value) ** 2)
+            target = -100
 
+        rl_loss = (target - pred) ** 2
         total_rl_loss += rl_loss
 
     avg_rl_loss = total_rl_loss / BATCH_SIZE

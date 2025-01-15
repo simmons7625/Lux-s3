@@ -97,6 +97,13 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 imitator = GATActor().to(device)
 tile_embedder = TileEmbeddingCNN().to(device)
 
+# モデルの重みをロード
+imitator_path = 'models/20250113_222631/step_10000/gnn_actor.pth'
+tile_embedder_path = 'models/20250113_222631/step_10000/tile_embedder.pth'
+
+imitator.load_state_dict(torch.load(imitator_path, map_location=device))
+tile_embedder.load_state_dict(torch.load(tile_embedder_path, map_location=device))
+
 optimizer = torch.optim.Adam(
     list(imitator.parameters()) + list(tile_embedder.parameters()),
     lr=1e-4
