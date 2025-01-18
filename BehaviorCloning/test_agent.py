@@ -1,10 +1,5 @@
 import json
-from typing import Dict
-import sys
 from argparse import Namespace
-
-import numpy as np
-
 from agent import Agent
 # from lux.config import EnvConfig
 from lux.kit import from_json
@@ -23,7 +18,7 @@ def agent_fn(observation, configurations):
     player = observation.player
     remainingOverageTime = observation.remainingOverageTime
     if step == 0:
-        agent_dict[player] = Agent(player, configurations["env_cfg"], model_dir='models/20250113_222631/step_10000/')
+        agent_dict[player] = Agent(player, configurations["env_cfg"], model_dir="models/20250117_214617/step_167")
     agent = agent_dict[player]
     actions = agent.act(step, from_json(obs), remainingOverageTime)
     return dict(action=actions.tolist())

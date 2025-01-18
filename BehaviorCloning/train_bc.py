@@ -10,8 +10,8 @@ from datetime import datetime
 from model import *
 
 # config
-NUM_LEARN = 10000
-BATCH_SIZE = 64
+NUM_LEARN = 100000
+BATCH_SIZE = 32
 NUM_STEPS = 100
 
 submission_map = {
@@ -21,7 +21,7 @@ submission_map = {
 }
 
 # データ読み込み
-data_dir = 'dataset/'
+data_dir = 'dataset/train_bc/'
 master_df = pd.read_csv(data_dir + 'episodes.csv')
 
 # ファイルパスリストを生成
@@ -36,7 +36,6 @@ def generate_file_paths(master_df, data_dir):
     return file_paths
 
 file_pathes = generate_file_paths(master_df, data_dir)
-
 # エピソードデータの読み込み
 def load_episode_json(file_pathes):
     file_path = random.choice(file_pathes)
@@ -97,12 +96,12 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 imitator = GATActor().to(device)
 tile_embedder = TileEmbeddingCNN().to(device)
 
-# モデルの重みをロード
-imitator_path = 'models/20250113_222631/step_10000/gnn_actor.pth'
-tile_embedder_path = 'models/20250113_222631/step_10000/tile_embedder.pth'
+# # モデルの重みをロード
+# imitator_path = 'models/20250113_222631/step_10000/gnn_actor.pth'
+# tile_embedder_path = 'models/20250113_222631/step_10000/tile_embedder.pth'
 
-imitator.load_state_dict(torch.load(imitator_path, map_location=device))
-tile_embedder.load_state_dict(torch.load(tile_embedder_path, map_location=device))
+# imitator.load_state_dict(torch.load(imitator_path, map_location=device))
+# tile_embedder.load_state_dict(torch.load(tile_embedder_path, map_location=device))
 
 optimizer = torch.optim.Adam(
     list(imitator.parameters()) + list(tile_embedder.parameters()),
@@ -124,7 +123,7 @@ for learn_step in progress_bar:
         if data is None: continue
         
         for id, name in submission_map.items():
-            if file_path[8:16] == id:
+            if file_path[17:25] == id:
                 team_name = name
         team = 0 if data['info']['TeamNames'][0] == team_name else 1
         win_flg = np.argmax(data['rewards']) == team
@@ -148,7 +147,7 @@ for learn_step in progress_bar:
         tile_nodes = build_tile_graph(map_features, relic_nodes, units, team, tile_embedder, device=device)
         input_nodes = torch.cat([unit_nodes, tile_nodes], dim=-1)
 
-        action_probs, action_values = imitator.forward(input_nodes, units_edges)
+        action_probs, action_values = imitator.forward(unit_nodes, tile_nodes, units_edges)
         selected_action_probs = action_probs.gather(1, sample_actions[:, 0].unsqueeze(1)).squeeze(1)
         bc_loss = -(torch.log(selected_action_probs + 1e-8).sum())
 
@@ -163,7 +162,7 @@ for learn_step in progress_bar:
     writer.add_scalar('Loss/BC', avg_bc_loss.item(), learn_step)
 
     # 1000回ごとにモデルを保存
-    if (learn_step + 1) % 1000 == 0:
+    if (learn_step + 1) % 10000 == 0:
         save_dir = model_dir + f'step_{learn_step + 1}'
         os.makedirs(save_dir, exist_ok=True)
         torch.save(tile_embedder.state_dict(), os.path.join(save_dir, 'tile_embedder.pth'))

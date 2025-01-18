@@ -1,5 +1,5 @@
 from lux.utils import direction_to
-import sys
+import os
 import numpy as np
 import torch
 from model import *
@@ -22,11 +22,13 @@ class Agent():
         self.tile_embedder = TileEmbeddingCNN()
 
         # モデルの重みをロード
-        imitator_path = model_dir + 'gnn_actor.pth'
-        tile_embedder_path = model_dir + 'tile_embedder.pth'
+        self.model_dir = model_dir
+        if self.model_dir:
+            imitator_path = os.path.join(model_dir, 'gnn_actor.pth')
+            tile_embedder_path = os.path.join(model_dir, 'tile_embedder.pth')
 
-        self.imitator.load_state_dict(torch.load(imitator_path, map_location=torch.device('cpu')))
-        self.tile_embedder.load_state_dict(torch.load(tile_embedder_path, map_location=torch.device('cpu')))
+            self.imitator.load_state_dict(torch.load(imitator_path, map_location=torch.device('cpu'), weights_only=True))
+            self.tile_embedder.load_state_dict(torch.load(tile_embedder_path, map_location=torch.device('cpu'), weights_only=True))
     
     # グラフ構築関数
     def build_tile_graph(self, map_features, relic_nodes, units, team, tile_embedder, device='cpu'):
@@ -91,7 +93,19 @@ class Agent():
         mask = units_mask[self.team_id]
         available_unit_ids = np.where(mask)[0]
 
-        if match_step < 50:
+        if self.model_dir and match_step >= 50 and available_unit_ids.size > 0:
+            # 後半フェーズ: モデルを利用して行動を選択
+            unit_nodes, units_edges = self.build_unit_graph(units, units_mask, self.team_id)
+            tile_nodes = self.build_tile_graph(map_features, relic_nodes, units, self.team_id, self.tile_embedder)
+            input_nodes = torch.cat([unit_nodes, tile_nodes], dim=-1)
+
+            action_probs, action_values = self.imitator.forward(input_nodes, units_edges)
+            selected_actions = torch.multinomial(action_probs, num_samples=1)
+            selected_actions = torch.cat([selected_actions, torch.zeros(selected_actions.size(0), 2)], dim=-1)
+
+            for idx, active_idx in enumerate(available_unit_ids):
+                actions[active_idx] = selected_actions[idx].cpu().numpy()
+        else:
             # 初期探索と収集フェーズ
             visible_relic_node_ids = set(np.where(observed_relic_nodes_mask)[0])
             for id in visible_relic_node_ids:
@@ -117,19 +131,6 @@ class Agent():
                     rand_loc = (np.random.randint(0, self.env_cfg["map_width"]), np.random.randint(0, self.env_cfg["map_height"]))
                     self.unit_explore_locations[unit_id] = rand_loc
                     actions[unit_id] = [direction_to(unit_pos, self.unit_explore_locations[unit_id]), 0, 0]
-        else:
-            # 後半フェーズ: モデルを利用して行動を選択
-            if available_unit_ids.size > 0:
-                unit_nodes, units_edges = self.build_unit_graph(units, units_mask, self.team_id)
-                tile_nodes = self.build_tile_graph(map_features, relic_nodes, units, self.team_id, self.tile_embedder)
-                input_nodes = torch.cat([unit_nodes, tile_nodes], dim=-1)
-
-                action_probs, action_values = self.imitator.forward(input_nodes, units_edges)
-                selected_actions = torch.multinomial(action_probs, num_samples=1)
-                selected_actions = torch.cat([selected_actions, torch.zeros(selected_actions.size(0), 2)], dim=-1)
-
-                for idx, active_idx in enumerate(available_unit_ids):
-                    actions[active_idx] = selected_actions[idx].cpu().numpy()
 
         # 攻撃アクション (id=5) の処理
         sap_range = self.env_cfg['unit_sap_range']
