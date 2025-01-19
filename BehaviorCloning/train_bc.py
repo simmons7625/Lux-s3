@@ -49,30 +49,45 @@ def load_episode_json(file_pathes):
 
 # グラフ構築関数
 def build_tile_graph(map_features, relic_nodes, units, team, tile_embedder, device='cuda'):
-    tile_type = np.array(map_features['tile_type'])
-    energy = np.array(map_features['energy'])
-    tiles = np.concatenate([tile_type[..., np.newaxis], energy[..., np.newaxis]], axis=-1)
+    # タイルタイプとエネルギーを取得
+    tile_type = np.array(map_features['tile_type'])  # (24, 24)
+    energy = np.array(map_features['energy'])  # (24, 24)
 
+    # Relic Nodeをタイルタイプに反映
     for pos in relic_nodes:
         x, y = pos
         if x == -1 or y == -1: continue
-        tiles[x, y, 0] = 3
+        tile_type[x, y] = 3  # Relic Nodeのラベルを3に設定
 
+    # タイルタイプをOne-Hotエンコード
+    num_tile_types = 4  # タイルタイプの種類数（0: 空白, 1: 星雲, 2: 小惑星, 3: Relic Node）
+    tile_type_onehot = np.eye(num_tile_types)[tile_type]  # (24, 24, num_tile_types)
+
+    # 敵ユニットの位置情報を追加
     adversal_pos = np.zeros_like(tile_type, dtype=np.float32)
-    for pos in units['position'][1 - team]:
+    for pos in units['position'][1 - team]:  # 敵チームのユニット位置
         x, y = pos
         if x == -1 or y == -1: continue
-        adversal_pos[x, y] += 1
+        adversal_pos[x, y] += 1  # 敵ユニット数をカウント
 
-    tiles = np.concatenate([tiles, adversal_pos[..., np.newaxis]], axis=-1)
+    # エネルギー情報と敵ユニット情報を結合
+    tiles = np.concatenate([
+        tile_type_onehot,  # (24, 24, num_tile_types)
+        energy[..., np.newaxis],  # (24, 24, 1)
+        adversal_pos[..., np.newaxis]  # (24, 24, 1)
+    ], axis=-1)  # 最終形状: (24, 24, num_tile_types + 2)
+
+    # タイル特徴量を埋め込み
     embed_tile = tile_embedder(torch.tensor(tiles, dtype=torch.float32, device=device))
 
+    # チームのユニットごとにタイル特徴量を取得
     tile_features = []
-    for pos in units['position'][team]:
+    for pos in units['position'][team]:  # 自チームのユニット位置
         x, y = pos
         if x == -1 or y == -1: continue
-        tile_features.append(embed_tile[x, y, :])
+        tile_features.append(embed_tile[x, y, :])  # 対応するタイルの特徴量を取得
 
+    # 結果をスタックしてTensorで返す
     return torch.stack(tile_features).to(device)
 
 def build_unit_graph(units, units_mask, team, device='cuda'):
