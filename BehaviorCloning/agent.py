@@ -13,6 +13,10 @@ class Agent():
         self.discovered_relic_nodes_ids = set()
         self.relic_node_point_map = {}
         self.point = 0
+        if self.team_id == 0:
+            self.start = np.array([0, 0])
+        else:
+            self.start = np.array([self.env_cfg["map_width"] - 1, self.env_cfg["map_height"] - 1])
 
         # モデルの初期化
         self.imitator = GATActor()
@@ -64,7 +68,12 @@ class Agent():
 
         tiles = np.concatenate([tiles, adversal_pos[..., np.newaxis]], axis=-1)
         embed_tile = tile_embedder(torch.tensor(tiles, dtype=torch.float32, device=device))
-        return embed_tile
+        tile_features = []
+        for pos in units['position'][team]:
+            x, y = pos
+            if x == -1 or y == -1: continue
+            tile_features.append(embed_tile[x, y, :])
+        return torch.stack(tile_features).to(device)
 
     def build_unit_graph(self, units, units_mask, team, device='cpu'):
         """
@@ -99,7 +108,6 @@ class Agent():
         distances = np.abs(next_positions - target_pos).sum(axis=1).astype(float)
         exp_values = np.exp(-distances)
         exp_values[~np.array(valid_moves)] = 0
-        # print(exp_values)
         if exp_values.sum() == 0:
             return np.array([0.2, 0.2, 0.2, 0.2, 0.2])
         return exp_values / exp_values.sum()
@@ -123,16 +131,15 @@ class Agent():
             if map_idx is not None:
                 # リリックノード付近のポイントマップを参照
                 if np.linalg.norm(np.array(nearest_relic_node) - np.array(unit_pos), ord=1) <= 2:
-                    probs = self.relic_node_point_map.get(map_idx, np.ones((5, 5)).flatten())
+                    probs = self.relic_node_point_map.get(map_idx, np.ones((5, 5))).flatten()
                     probs = probs / probs.sum()
                     chosen_index = np.random.choice(25, p=probs)
                     offset = np.array([chosen_index // 5, chosen_index % 5]) - 2
                     return np.array(nearest_relic_node) + offset
             return np.array(nearest_relic_node)
         else:
-            # リリックノードが見つからない場合はユニットの重心方向
-            unit_center = np.mean([unit_pos], axis=0)
-            return unit_pos + (unit_pos - unit_center)
+            # far from start
+            return unit_pos + (unit_pos - self.start)
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
         """
@@ -141,6 +148,7 @@ class Agent():
         units_mask = obs['units_mask']
         units = obs['units']
         map_features = obs['map_features']
+        match_step = obs['match_steps']
         observed_relic_node_positions = np.array(obs['relic_nodes'])
         observed_relic_nodes_mask = np.array(obs['relic_nodes_mask'])
         unit_positions = np.array(obs["units"]["position"][self.team_id])
@@ -153,17 +161,27 @@ class Agent():
             if idx not in self.discovered_relic_nodes_ids:
                 self.discovered_relic_nodes_ids.add(idx)
                 self.relic_node_positions.append(observed_relic_node_positions[idx])
-
-        # 各ユニットの行動を決定
-        for unit_id in np.where(units_mask[self.team_id])[0]:
-            unit_pos = unit_positions[unit_id]
-            target_pos = self._determine_target(unit_pos)
-            action_probabilities = self._calculate_action_probabilities(unit_pos, target_pos, map_features['tile_type'])
-            actions[unit_id, 0] = np.random.choice(5, p=action_probabilities)
-
+        
         # ポイント増加量を更新
         point_delta = obs['team_points'][self.team_id] - self.point
         self.update_relic_node_points(point_delta, unit_positions)
         self.point = obs['team_points'][self.team_id]
+
+        if self.model_dir and match_step >= 50 and np.where(units_mask[self.team_id])[0].size > 0:
+            # 後半フェーズ: モデルを利用して行動を選択
+            unit_nodes, units_edges = self.build_unit_graph(units, units_mask, self.team_id)
+            tile_nodes = self.build_tile_graph(map_features, self.relic_node_positions, units, self.team_id, self.tile_embedder)
+            action_probs, action_values = self.imitator.forward(unit_nodes, tile_nodes, units_edges)
+            selected_actions = torch.multinomial(action_probs, num_samples=1)
+            selected_actions = torch.cat([selected_actions, torch.zeros(selected_actions.size(0), 2)], dim=-1)
+            for idx, active_idx in enumerate(np.where(units_mask[self.team_id])[0]):
+                actions[active_idx] = selected_actions[idx].cpu().numpy()
+        else:
+            # 各ユニットの行動を決定
+            for unit_id in np.where(units_mask[self.team_id])[0]:
+                unit_pos = unit_positions[unit_id]
+                target_pos = self._determine_target(unit_pos)
+                action_probabilities = self._calculate_action_probabilities(unit_pos, target_pos, map_features['tile_type'])
+                actions[unit_id, 0] = np.random.choice(5, p=action_probabilities)
 
         return actions
