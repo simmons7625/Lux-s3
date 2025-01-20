@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import GATConv
 
 class TileEmbeddingCNN(nn.Module):
-    def __init__(self, input_dim=3, hidden_dim=32, num_layers=3, kernel_size=7):
+    def __init__(self, input_dim=6, hidden_dim=32, num_layers=3, kernel_size=7):
         super(TileEmbeddingCNN, self).__init__()
         self.conv_in = nn.Conv2d(input_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
         self.layer_norm_in = nn.LayerNorm(hidden_dim)

@@ -18,7 +18,7 @@ def agent_fn(observation, configurations):
     player = observation.player
     remainingOverageTime = observation.remainingOverageTime
     if step == 0:
-        agent_dict[player] = Agent(player, configurations["env_cfg"], model_dir="models/20250118_224817/step_10000")
+        agent_dict[player] = Agent(player, configurations["env_cfg"], model_dir="models/20250119_203638/step_10000")
     agent = agent_dict[player]
     actions = agent.act(step, from_json(obs), remainingOverageTime)
     return dict(action=actions.tolist())
