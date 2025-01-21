@@ -186,57 +186,48 @@ class Agent():
             # 後半フェーズ: モデルを利用して行動を選択
             unit_nodes, units_edges = self.build_unit_graph(units, units_mask, self.team_id)
             tile_nodes = self.build_tile_graph(map_features, self.relic_node_positions, units, self.team_id, self.tile_embedder)
-            action_probs, action_values = self.imitator.forward(unit_nodes, tile_nodes, units_edges)
-            # selected_actions = torch.multinomial(action_probs, num_samples=1)
-            # selected_actions = torch.cat([selected_actions, torch.zeros(selected_actions.size(0), 2)], dim=-1)
-            # for idx, active_idx in enumerate(np.where(units_mask[self.team_id])[0]):
-            #     actions[active_idx] = selected_actions[idx].detach().numpy()
-
-            # edit action_probs
+            action_probs, _ = self.imitator.forward(unit_nodes, tile_nodes, units_edges)
+            # Check if enemies are within attack range
+            sap_range = self.env_cfg['unit_sap_range']
+            adversal_pos = np.array(obs['units']['position'][np.where(units_mask[1-self.team_id])[0]])  # Enemy positions
+            # Edit action_probs
             for idx, unit_id in enumerate(np.where(units_mask[self.team_id])[0]):
                 unit_pos = unit_positions[unit_id]
                 probs = action_probs[idx, :].detach().numpy()
-                if probs[5] > 1/len(probs):
+                action = np.random.choice(6, p=probs)
+
+                if action == 5 and adversal_pos.shape[0] > 0:  # Attack action and enemies exist
+                    relative_positions = adversal_pos - unit_pos
+                    distances = np.linalg.norm(relative_positions, axis=-1)
+
+                    if np.any(distances <= sap_range):  # Enemy within attack range
+                        nearest_enemy_idx = np.argmin(distances)
+                        target_relative_position = relative_positions[nearest_enemy_idx]
+                        target_relative_position = np.clip(target_relative_position, a_min=-sap_range, a_max=sap_range)
+                        actions[unit_id, 0] = action
+                        actions[unit_id, 1:3] = target_relative_position
+                    else:  # No enemy in range, adjust probabilities
+                        target_pos = self._determine_target(unit_pos)
+                        weight = self._calculate_action_probabilities(unit_pos, target_pos, map_features['tile_type'])
+                        weighted_probs = weight * probs[:5]
+                        if weighted_probs.sum() == 0:
+                            probs = np.ones_like(weighted_probs) / len(weighted_probs)
+                        else:
+                            probs = weighted_probs / weighted_probs.sum()
+                        actions[unit_id, 0] = np.random.choice(5, p=probs)
+                else:  # Non-attack action
                     target_pos = self._determine_target(unit_pos)
                     weight = self._calculate_action_probabilities(unit_pos, target_pos, map_features['tile_type'])
-                    
                     weighted_probs = weight * probs[:5]
-                    probs = weighted_probs / weighted_probs.sum()
-                    weighted_probs = weight * probs
                     if weighted_probs.sum() == 0:
                         probs = np.ones_like(weighted_probs) / len(weighted_probs)
                     else:
                         probs = weighted_probs / weighted_probs.sum()
-                    probs = np.append(probs, 0)
-                    
-                actions[unit_id, 0] = np.random.choice(6, p=probs)
-
+                    actions[unit_id, 0] = np.random.choice(5, p=probs)
         else:
-            # 各ユニットの行動を決定
             for unit_id in np.where(units_mask[self.team_id])[0]:
                 unit_pos = unit_positions[unit_id]
                 target_pos = self._determine_target(unit_pos)
                 action_probabilities = self._calculate_action_probabilities(unit_pos, target_pos, map_features['tile_type'])
-                actions[unit_id, 0] = np.random.choice(5, p=action_probabilities)
-        
-        # 攻撃アクション (id=5) の処理
-        sap_range = self.env_cfg['unit_sap_range']
-        adversal_pos = np.array(obs['units']['position'][1 - self.team_id])  # 敵位置
-
-        if adversal_pos.shape[0] > 0:  # 敵が存在する場合のみ処理
-            attack_action_mask = actions[:, 0] == 5
-            if attack_action_mask.any():
-                unit_positions_tensor = np.array(unit_positions)  # 自チームユニット位置
-                # 敵とユニットの相対位置を計算
-                relative_positions = np.expand_dims(adversal_pos, 1) - np.expand_dims(unit_positions_tensor, 0)  # shape: (num_enemies, num_units, 2)
-                distances = np.linalg.norm(relative_positions, axis=-1)  # shape: (num_enemies, num_units)
-                # 最近傍の敵を見つける
-                nearest_enemy_indices = np.argmin(distances, axis=0)  # 最近傍の敵インデックス
-                nearest_relative_positions = relative_positions[nearest_enemy_indices, np.arange(unit_positions_tensor.shape[0])]  # shape: (num_units, 2)
-                # 攻撃範囲内にクリップ
-                nearest_relative_positions = np.clip(nearest_relative_positions, a_min=-sap_range, a_max=sap_range)
-                # 攻撃アクションに反映
-                actions[attack_action_mask, 1:3] = nearest_relative_positions[attack_action_mask]
-
-        
+                actions[unit_id, 0] = np.random.choice(5, p=action_probabilities)              
         return actions
