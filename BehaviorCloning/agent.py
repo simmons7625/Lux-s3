@@ -196,7 +196,7 @@ class Agent():
             for idx, unit_id in enumerate(np.where(units_mask[self.team_id])[0]):
                 unit_pos = unit_positions[unit_id]
                 probs = action_probs[idx, :].detach().numpy()
-                if np.random.choice(6, p=probs) != 5:
+                if probs[5] > 1/len(probs):
                     target_pos = self._determine_target(unit_pos)
                     weight = self._calculate_action_probabilities(unit_pos, target_pos, map_features['tile_type'])
                     

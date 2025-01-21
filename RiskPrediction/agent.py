@@ -19,16 +19,13 @@ class Agent():
             self.start = np.array([self.env_cfg["map_width"] - 1, self.env_cfg["map_height"] - 1])
 
         # モデルの初期化
-        self.imitator = GATActor()
-        self.tile_embedder = TileEmbeddingCNN()
+        self.sap_manager = RiskPredUNet()
 
         # モデルの重みをロード
         if model_dir:
             self.model_dir = model_dir
-            imitator_path = os.path.join(model_dir, 'gnn_actor.pth')
-            tile_embedder_path = os.path.join(model_dir, 'tile_embedder.pth')
-            self.imitator.load_state_dict(torch.load(imitator_path, map_location=torch.device('cpu'), weights_only=True))
-            self.tile_embedder.load_state_dict(torch.load(tile_embedder_path, map_location=torch.device('cpu'), weights_only=True))
+            sap_manager_path = os.path.join(model_dir, 'risk_predicter.pth')
+            self.sap_manager.load_state_dict(torch.load(sap_manager_path, map_location=torch.device('cpu'), weights_only=True))
         else:
             self.model_dir = None
 
@@ -49,8 +46,7 @@ class Agent():
                 if -2 <= dx <= 2 and -2 <= dy <= 2:
                     self.relic_node_point_map[idx][dx + 2, dy + 2] += point_delta
     
-    # グラフ構築関数
-    def build_tile_graph(self, map_features, relic_nodes, units, team, tile_embedder, device='cpu'):
+    def build_tile_graph(self, map_features, relic_nodes, units, team, device='cuda'):
         # タイルタイプとエネルギーを取得
         tile_type = np.array(map_features['tile_type'])  # (24, 24)
         energy = np.array(map_features['energy'])  # (24, 24)
@@ -64,49 +60,30 @@ class Agent():
         # タイルタイプをOne-Hotエンコード
         num_tile_types = 4  # タイルタイプの種類数（0: 空白, 1: 星雲, 2: 小惑星, 3: Relic Node）
         tile_type_onehot = np.eye(num_tile_types)[tile_type]  # (24, 24, num_tile_types)
-
+        
         # 敵ユニットの位置情報を追加
-        adversal_pos = np.zeros_like(tile_type, dtype=np.float32)
-        for pos in units['position'][1 - team]:  # 敵チームのユニット位置
+        team_energy = np.zeros_like(tile_type, dtype=np.float32)
+        for i, pos in enumerate(units['position'][team]):  # 敵チームのユニット位置
             x, y = pos
             if x == -1 or y == -1: continue
-            adversal_pos[x, y] += 1  # 敵ユニット数をカウント
+            team_energy[x, y] += units['energy'][team][i]  
 
+        # 敵ユニットの位置情報を追加
+        enemy_energy = np.zeros_like(tile_type, dtype=np.float32)
+        for i, pos in enumerate(units['position'][1-team]):  # 敵チームのユニット位置
+            x, y = pos
+            if x == -1 or y == -1: continue
+            enemy_energy[x, y] += units['energy'][1-team][i]  
+        
         # エネルギー情報と敵ユニット情報を結合
         tiles = np.concatenate([
             tile_type_onehot,  # (24, 24, num_tile_types)
             energy[..., np.newaxis],  # (24, 24, 1)
-            adversal_pos[..., np.newaxis]  # (24, 24, 1)
-        ], axis=-1)  # 最終形状: (24, 24, num_tile_types + 2)
+            team_energy[..., np.newaxis],  # (24, 24, 1)
+            enemy_energy[..., np.newaxis]  # (24, 24, 1)
+        ], axis=-1)
 
-        # タイル特徴量を埋め込み
-        embed_tile = tile_embedder(torch.tensor(tiles, dtype=torch.float32, device=device))
-
-        # チームのユニットごとにタイル特徴量を取得
-        tile_features = []
-        for pos in units['position'][team]:  # 自チームのユニット位置
-            x, y = pos
-            if x == -1 or y == -1: continue
-            tile_features.append(embed_tile[x, y, :])  # 対応するタイルの特徴量を取得
-
-        # 結果をスタックしてTensorで返す
-        return torch.stack(tile_features).to(device)
-
-    def build_unit_graph(self, units, units_mask, team, device='cpu'):
-        indices = np.where(units_mask[team])[0]
-        team_positions = np.array(units['position'][team])[indices]
-        team_energies = np.array(units['energy'][team])[indices]
-
-        team_nodes = np.zeros((len(team_positions), 3), dtype=np.float32)
-        team_nodes[:, :2] = team_positions
-        team_nodes[:, 2] = team_energies
-
-        units_nodes = torch.tensor(team_nodes, dtype=torch.float32, device=device)
-        num_nodes = len(units_nodes)
-        edge_index = torch.combinations(torch.arange(num_nodes, device=device), r=2, with_replacement=False)
-        edge_index = torch.cat([edge_index, edge_index.flip(dims=(1,))], dim=0).T
-
-        return units_nodes, edge_index
+        return torch.tensor(tiles, dtype=torch.float32, device=device)
 
     def _calculate_action_probabilities(self, unit_pos, target_pos, tile_types):
         """
@@ -182,61 +159,31 @@ class Agent():
         self.update_relic_node_points(point_delta, unit_positions)
         self.point = obs['team_points'][self.team_id]
 
-        if self.model_dir and match_step >= 50 and np.where(units_mask[self.team_id])[0].size > 0:
-            # 後半フェーズ: モデルを利用して行動を選択
-            unit_nodes, units_edges = self.build_unit_graph(units, units_mask, self.team_id)
-            tile_nodes = self.build_tile_graph(map_features, self.relic_node_positions, units, self.team_id, self.tile_embedder)
-            action_probs, action_values = self.imitator.forward(unit_nodes, tile_nodes, units_edges)
-            # selected_actions = torch.multinomial(action_probs, num_samples=1)
-            # selected_actions = torch.cat([selected_actions, torch.zeros(selected_actions.size(0), 2)], dim=-1)
-            # for idx, active_idx in enumerate(np.where(units_mask[self.team_id])[0]):
-            #     actions[active_idx] = selected_actions[idx].detach().numpy()
-
-            # edit action_probs
-            for idx, unit_id in enumerate(np.where(units_mask[self.team_id])[0]):
-                unit_pos = unit_positions[unit_id]
-                probs = action_probs[idx, :].detach().numpy()
-                if np.random.choice(6, p=probs) != 5:
-                    target_pos = self._determine_target(unit_pos)
-                    weight = self._calculate_action_probabilities(unit_pos, target_pos, map_features['tile_type'])
-                    
-                    weighted_probs = weight * probs[:5]
-                    probs = weighted_probs / weighted_probs.sum()
-                    weighted_probs = weight * probs
-                    if weighted_probs.sum() == 0:
-                        probs = np.ones_like(weighted_probs) / len(weighted_probs)
-                    else:
-                        probs = weighted_probs / weighted_probs.sum()
-                    probs = np.append(probs, 0)
-                    
-                actions[unit_id, 0] = np.random.choice(6, p=probs)
-
-        else:
-            # 各ユニットの行動を決定
-            for unit_id in np.where(units_mask[self.team_id])[0]:
-                unit_pos = unit_positions[unit_id]
-                target_pos = self._determine_target(unit_pos)
-                action_probabilities = self._calculate_action_probabilities(unit_pos, target_pos, map_features['tile_type'])
-                actions[unit_id, 0] = np.random.choice(5, p=action_probabilities)
-        
+        input_map = self.build_tile_graph(map_features, self.relic_node_positions, units, self.team_id)
+        # pred_hazard_level
+        hazard_map = self.sap_manager(input_map)
         # 攻撃アクション (id=5) の処理
         sap_range = self.env_cfg['unit_sap_range']
-        adversal_pos = np.array(obs['units']['position'][1 - self.team_id])  # 敵位置
+        enemy_pos = np.array(obs['units']['position'][1 - self.team_id])  # 敵位置
 
-        if adversal_pos.shape[0] > 0:  # 敵が存在する場合のみ処理
-            attack_action_mask = actions[:, 0] == 5
-            if attack_action_mask.any():
-                unit_positions_tensor = np.array(unit_positions)  # 自チームユニット位置
-                # 敵とユニットの相対位置を計算
-                relative_positions = np.expand_dims(adversal_pos, 1) - np.expand_dims(unit_positions_tensor, 0)  # shape: (num_enemies, num_units, 2)
-                distances = np.linalg.norm(relative_positions, axis=-1)  # shape: (num_enemies, num_units)
-                # 最近傍の敵を見つける
-                nearest_enemy_indices = np.argmin(distances, axis=0)  # 最近傍の敵インデックス
-                nearest_relative_positions = relative_positions[nearest_enemy_indices, np.arange(unit_positions_tensor.shape[0])]  # shape: (num_units, 2)
-                # 攻撃範囲内にクリップ
-                nearest_relative_positions = np.clip(nearest_relative_positions, a_min=-sap_range, a_max=sap_range)
-                # 攻撃アクションに反映
-                actions[attack_action_mask, 1:3] = nearest_relative_positions[attack_action_mask]
+        # 各ユニットの行動を決定
+        for unit_id in np.where(units_mask[self.team_id])[0]:
+            unit_pos = unit_positions[unit_id]  # 自分のユニットの位置
+            target_pos = self._determine_target(unit_pos)  # 目標位置の決定
+            action_probabilities = self._calculate_action_probabilities(unit_pos, target_pos, map_features['tile_type'])
+            actions[unit_id, 0] = np.random.choice(5, p=action_probabilities)
 
-        
+            # 敵が存在する場合のみ処理
+            if enemy_pos.shape[0] > 0:
+                for pos in enemy_pos:
+                    x, y = pos
+                    relevant_pos = pos - unit_pos
+                    # マンハッタン距離の計算
+                    dist = np.abs(relevant_pos).sum()
+                    # 攻撃範囲内かつ hazard_map の条件を満たす場合、攻撃アクションを設定
+                    if dist <= sap_range and hazard_map[x, y] < 0 and np.random.random() < abs(hazard_map[x, y]):
+                        actions[unit_id, 0] = 5  # 攻撃アクション
+                        actions[unit_id, 1:] = relevant_pos  # 攻撃対象の相対位置
+                        break
+
         return actions

@@ -13,11 +13,11 @@ from model import *
 NUM_LEARN = 100000
 BATCH_SIZE = 32
 NUM_STEPS = 100
+gamma = 0.99
 
 submission_map = {
     '41862933':'ry_andy_', 
     '41863713':'ry_andy_', 
-    # '41789980':"aDg4b"
 }
 
 # データ読み込み
@@ -46,9 +46,8 @@ def load_episode_json(file_pathes):
     except FileNotFoundError:
         print(f"Error: File {file_path} not found.")
         return None
-
-# グラフ構築関数
-def build_tile_graph(map_features, relic_nodes, units, team, tile_embedder, device='cuda'):
+    
+def build_tile_graph(map_features, relic_nodes, units, team, device='cuda'):
     # タイルタイプとエネルギーを取得
     tile_type = np.array(map_features['tile_type'])  # (24, 24)
     energy = np.array(map_features['energy'])  # (24, 24)
@@ -62,66 +61,34 @@ def build_tile_graph(map_features, relic_nodes, units, team, tile_embedder, devi
     # タイルタイプをOne-Hotエンコード
     num_tile_types = 4  # タイルタイプの種類数（0: 空白, 1: 星雲, 2: 小惑星, 3: Relic Node）
     tile_type_onehot = np.eye(num_tile_types)[tile_type]  # (24, 24, num_tile_types)
-
+    
     # 敵ユニットの位置情報を追加
-    adversal_pos = np.zeros_like(tile_type, dtype=np.float32)
-    for pos in units['position'][1 - team]:  # 敵チームのユニット位置
+    team_energy = np.zeros_like(tile_type, dtype=np.float32)
+    for i, pos in enumerate(units['position'][team]):  # 敵チームのユニット位置
         x, y = pos
         if x == -1 or y == -1: continue
-        adversal_pos[x, y] += 1  # 敵ユニット数をカウント
+        team_energy[x, y] += units['energy'][team][i]  
 
+    # 敵ユニットの位置情報を追加
+    adversal_energy = np.zeros_like(tile_type, dtype=np.float32)
+    for i, pos in enumerate(units['position'][1-team]):  # 敵チームのユニット位置
+        x, y = pos
+        if x == -1 or y == -1: continue
+        adversal_energy[x, y] += units['energy'][1-team][i]  
+    
     # エネルギー情報と敵ユニット情報を結合
     tiles = np.concatenate([
         tile_type_onehot,  # (24, 24, num_tile_types)
         energy[..., np.newaxis],  # (24, 24, 1)
-        adversal_pos[..., np.newaxis]  # (24, 24, 1)
-    ], axis=-1)  # 最終形状: (24, 24, num_tile_types + 2)
-
-    # タイル特徴量を埋め込み
-    embed_tile = tile_embedder(torch.tensor(tiles, dtype=torch.float32, device=device))
-
-    # チームのユニットごとにタイル特徴量を取得
-    tile_features = []
-    for pos in units['position'][team]:  # 自チームのユニット位置
-        x, y = pos
-        if x == -1 or y == -1: continue
-        tile_features.append(embed_tile[x, y, :])  # 対応するタイルの特徴量を取得
-
-    # 結果をスタックしてTensorで返す
-    return torch.stack(tile_features).to(device)
-
-def build_unit_graph(units, units_mask, team, device='cuda'):
-    indices = np.where(units_mask[team])[0]
-    team_positions = np.array(units['position'][team])[indices]
-    team_energies = np.array(units['energy'][team])[indices]
-
-    team_nodes = np.zeros((len(team_positions), 3), dtype=np.float32)
-    team_nodes[:, :2] = team_positions
-    team_nodes[:, 2] = team_energies
-
-    units_nodes = torch.tensor(team_nodes, dtype=torch.float32, device=device)
-    num_nodes = len(units_nodes)
-    edge_index = torch.combinations(torch.arange(num_nodes, device=device), r=2, with_replacement=False)
-    edge_index = torch.cat([edge_index, edge_index.flip(dims=(1,))], dim=0).T
-
-    return units_nodes, edge_index
+        team_energy[..., np.newaxis],  # (24, 24, 1)
+        adversal_energy[..., np.newaxis]  # (24, 24, 1)
+    ], axis=-1)
+    return torch.tensor(tiles, dtype=torch.float32, device=device)
 
 # モデルとパラメータの初期化
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-imitator = GATActor().to(device)
-tile_embedder = TileEmbeddingCNN().to(device)
-
-# # モデルの重みをロード
-# imitator_path = 'models/20250113_222631/step_10000/gnn_actor.pth'
-# tile_embedder_path = 'models/20250113_222631/step_10000/tile_embedder.pth'
-
-# imitator.load_state_dict(torch.load(imitator_path, map_location=device))
-# tile_embedder.load_state_dict(torch.load(tile_embedder_path, map_location=device))
-
-optimizer = torch.optim.Adam(
-    list(imitator.parameters()) + list(tile_embedder.parameters()),
-    lr=1e-4
-)
+risk_predicter = RiskPredUNet().to(device)
+optimizer = torch.optim.Adam(risk_predicter.parameters(), lr=1e-4)
 
 # ログディレクトリをdatetimeで一意に生成
 log_dir = f'logs/{datetime.now().strftime("%Y%m%d_%H%M%S")}'
@@ -131,7 +98,7 @@ writer = SummaryWriter(log_dir=log_dir)
 # 学習ループ
 progress_bar = tqdm(range(NUM_LEARN), desc="Training Progress")
 for learn_step in progress_bar:
-    total_bc_loss = 0
+    total_loss = 0
 
     for _ in range(BATCH_SIZE):
         data, file_path = load_episode_json(file_pathes)
@@ -153,35 +120,45 @@ for learn_step in progress_bar:
         map_features = obs['map_features']
         relic_nodes = obs['relic_nodes']
 
-        sample_actions = np.array(step_log['action'])[np.where(units_mask[team])[0]]
-        sample_actions = torch.tensor(sample_actions, dtype=torch.long, device=device)
-        if len(sample_actions) == 0:
+        input_map = build_tile_graph(map_features, relic_nodes, units, team, device=device)
+        hazard_map = risk_predicter(input_map)
+        
+        # 敵座標から hazard_map の値を抽出
+        enemy_team = 1 - team  # 敵チームのインデックス
+        enemy_positions = units['position'][enemy_team]  # 敵チームの座標リスト
+
+        # 敵座標から hazard_map の値を取得
+        extracted_hazard_values = []
+        for pos in enemy_positions:
+            x, y = pos
+            if x != -1 and y != -1:  # 有効な座標のみを対象
+                extracted_hazard_values.append(hazard_map[x, y])
+        if not extracted_hazard_values:  # 敵がいない場合はスキップ
             continue
 
-        unit_nodes, units_edges = build_unit_graph(units, units_mask, team, device=device)
-        tile_nodes = build_tile_graph(map_features, relic_nodes, units, team, tile_embedder, device=device)
-        input_nodes = torch.cat([unit_nodes, tile_nodes], dim=-1)
+        # 抽出した値をテンソル化
+        extracted_hazard_values = torch.stack(extracted_hazard_values)  # Tensor化
 
-        action_probs, action_values = imitator.forward(unit_nodes, tile_nodes, units_edges)
-        selected_action_probs = action_probs.gather(1, sample_actions[:, 0].unsqueeze(1)).squeeze(1)
-        bc_loss = -(torch.log(selected_action_probs + 1e-8).sum())
+        # ターゲット値を計算
+        target = gamma ** (NUM_STEPS - step) if win_flg else -(gamma ** (NUM_STEPS - step))
+        target_tensor = torch.full_like(extracted_hazard_values, target)
 
-        total_bc_loss += bc_loss
+        # 損失計算
+        loss = F.mse_loss(extracted_hazard_values, target_tensor)
+        total_loss += loss
 
-    avg_bc_loss = total_bc_loss / BATCH_SIZE
-
+    avg_loss = total_loss / BATCH_SIZE
     optimizer.zero_grad()
-    avg_bc_loss.backward()
+    avg_loss.backward()
     optimizer.step()
 
-    writer.add_scalar('Loss/BC', avg_bc_loss.item(), learn_step)
+    writer.add_scalar('Loss', avg_loss.item(), learn_step)
 
     # 1000回ごとにモデルを保存
     if (learn_step + 1) % 10000 == 0:
         save_dir = model_dir + f'step_{learn_step + 1}'
         os.makedirs(save_dir, exist_ok=True)
-        torch.save(tile_embedder.state_dict(), os.path.join(save_dir, 'tile_embedder.pth'))
-        torch.save(imitator.state_dict(), os.path.join(save_dir, 'gnn_actor.pth'))
+        torch.save(risk_predicter.state_dict(), os.path.join(save_dir, 'risk_predicter.pth'))
         print(f"Model checkpoint saved at step {learn_step + 1}")
 
 writer.close()
