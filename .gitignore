@@ -4,5 +4,6 @@ episodes/
 .vscode/
 replays/
 *.json
-BehaviorCloning/logs/*
-BehaviorCloning/models/*
+*.csv
+*.html
+*/logs/*
