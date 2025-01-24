@@ -38,10 +38,9 @@ class Agent():
         """
         if point_delta <= 0:
             return
-
         for idx, relic_pos in enumerate(self.relic_node_positions):
-            if idx not in self.relic_node_point_map:
-                self.relic_node_point_map[idx] = np.zeros((5, 5), dtype=np.float32)
+            if idx not in self.relic_node_point_map.keys():
+                self.relic_node_point_map[idx] = np.ones((5, 5), dtype=np.float32)
             
             center_x, center_y = relic_pos
             for unit_pos in unit_positions:
@@ -60,23 +59,25 @@ class Agent():
             x, y = pos
             if x == -1 or y == -1: continue
             tile_type[x, y] = 3  # Relic Nodeのラベルを3に設定
-
+            # 対称の位置にもrelic_nodeは存在
+            tile_type[23-y, 23-x] = 3
+            
         # タイルタイプをOne-Hotエンコード
         num_tile_types = 4  # タイルタイプの種類数（0: 空白, 1: 星雲, 2: 小惑星, 3: Relic Node）
         tile_type_onehot = np.eye(num_tile_types)[tile_type]  # (24, 24, num_tile_types)
 
         # 敵ユニットの位置情報を追加
-        adversal_pos = np.zeros_like(tile_type, dtype=np.float32)
-        for pos in units['position'][1 - team]:  # 敵チームのユニット位置
+        adversal_energy = np.zeros_like(tile_type, dtype=np.float32)
+        for i, pos in enumerate(units['position'][1 - team]):  # 敵チームのユニット位置
             x, y = pos
             if x == -1 or y == -1: continue
-            adversal_pos[x, y] += 1  # 敵ユニット数をカウント
+            adversal_energy[x, y] += units['energy'][1 - team][i]  # 敵ユニット数をカウント
 
         # エネルギー情報と敵ユニット情報を結合
         tiles = np.concatenate([
             tile_type_onehot,  # (24, 24, num_tile_types)
             energy[..., np.newaxis],  # (24, 24, 1)
-            adversal_pos[..., np.newaxis]  # (24, 24, 1)
+            adversal_energy[..., np.newaxis]  # (24, 24, 1)
         ], axis=-1)  # 最終形状: (24, 24, num_tile_types + 2)
 
         # タイル特徴量を埋め込み
@@ -131,7 +132,7 @@ class Agent():
         """
         ユニットの現在位置から次のターゲット位置を決定
         """
-        if self.relic_node_positions:
+        if len(self.relic_node_positions) > 0:
             # 最も近いリリックノードを探索
             nearest_relic_node = min(
                 self.relic_node_positions,
@@ -140,13 +141,13 @@ class Agent():
             # リリックノードのインデックスを取得
             map_idx = next(
                 (idx for idx, pos in enumerate(self.relic_node_positions)
-                if np.array_equal(pos, nearest_relic_node)),
+                 if np.array_equal(pos, nearest_relic_node)),
                 None
             )
-            if map_idx is not None:
+            if map_idx is not None and map_idx in self.relic_node_point_map.keys():
                 # リリックノード付近のポイントマップを参照
                 if np.linalg.norm(np.array(nearest_relic_node) - np.array(unit_pos), ord=1) <= 2:
-                    probs = self.relic_node_point_map.get(map_idx, np.ones((5, 5))).flatten()
+                    probs = self.relic_node_point_map[map_idx].flatten()
                     probs = probs / probs.sum()
                     chosen_index = np.random.choice(25, p=probs)
                     offset = np.array([chosen_index // 5, chosen_index % 5]) - 2
@@ -182,14 +183,15 @@ class Agent():
         self.update_relic_node_points(point_delta, unit_positions)
         self.point = obs['team_points'][self.team_id]
 
-        if self.model_dir and match_step >= 50 and np.where(units_mask[self.team_id])[0].size > 0:
+        if self.model_dir and match_step >= 30:
+        # if np.where(units_mask[self.team_id])[0].size > 10:
             # 後半フェーズ: モデルを利用して行動を選択
             unit_nodes, units_edges = self.build_unit_graph(units, units_mask, self.team_id)
             tile_nodes = self.build_tile_graph(map_features, self.relic_node_positions, units, self.team_id, self.tile_embedder)
             action_probs, _ = self.imitator.forward(unit_nodes, tile_nodes, units_edges)
             # Check if enemies are within attack range
             sap_range = self.env_cfg['unit_sap_range']
-            adversal_pos = np.array(obs['units']['position'][np.where(units_mask[1-self.team_id])[0]])  # Enemy positions
+            adversal_pos = np.array(obs['units']['position'][1-self.team_id][np.where(units_mask[1-self.team_id])[0]])  # Enemy positions
             # Edit action_probs
             for idx, unit_id in enumerate(np.where(units_mask[self.team_id])[0]):
                 unit_pos = unit_positions[unit_id]

@@ -58,23 +58,25 @@ def build_tile_graph(map_features, relic_nodes, units, team, tile_embedder, devi
         x, y = pos
         if x == -1 or y == -1: continue
         tile_type[x, y] = 3  # Relic Nodeのラベルを3に設定
+        # 対称の位置にもrelic_nodeは存在
+        tile_type[23-y, 23-x] = 3
 
     # タイルタイプをOne-Hotエンコード
     num_tile_types = 4  # タイルタイプの種類数（0: 空白, 1: 星雲, 2: 小惑星, 3: Relic Node）
     tile_type_onehot = np.eye(num_tile_types)[tile_type]  # (24, 24, num_tile_types)
 
     # 敵ユニットの位置情報を追加
-    adversal_pos = np.zeros_like(tile_type, dtype=np.float32)
-    for pos in units['position'][1 - team]:  # 敵チームのユニット位置
+    adversal_energy = np.zeros_like(tile_type, dtype=np.float32)
+    for i, pos in enumerate(units['position'][1 - team]):  # 敵チームのユニット位置
         x, y = pos
         if x == -1 or y == -1: continue
-        adversal_pos[x, y] += 1  # 敵ユニット数をカウント
+        adversal_energy[x, y] += units['energy'][1 - team][i]  # 敵ユニット数をカウント
 
     # エネルギー情報と敵ユニット情報を結合
     tiles = np.concatenate([
         tile_type_onehot,  # (24, 24, num_tile_types)
         energy[..., np.newaxis],  # (24, 24, 1)
-        adversal_pos[..., np.newaxis]  # (24, 24, 1)
+        adversal_energy[..., np.newaxis]  # (24, 24, 1)
     ], axis=-1)  # 最終形状: (24, 24, num_tile_types + 2)
 
     # タイル特徴量を埋め込み
@@ -88,7 +90,7 @@ def build_tile_graph(map_features, relic_nodes, units, team, tile_embedder, devi
         tile_features.append(embed_tile[x, y, :])  # 対応するタイルの特徴量を取得
 
     # 結果をスタックしてTensorで返す
-    return torch.stack(tile_features).to(device)
+    return torch.stack(tile_features).to(device)          
 
 def build_unit_graph(units, units_mask, team, device='cuda'):
     indices = np.where(units_mask[team])[0]
