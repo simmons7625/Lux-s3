@@ -26,7 +26,7 @@ class Trainer:
         self.tile_embedder = TileEmbeddingCNN().to(self.device)
         self.optimizer = torch.optim.Adam(
             list(self.imitator.parameters()) + list(self.tile_embedder.parameters()),
-            lr=5e-4
+            lr=1e-4
         )
 
         self.load_model_weights()
@@ -49,35 +49,60 @@ class Trainer:
             print(f"Error: File {file_path} not found.")
             return None, None
 
+    # グラフ構築関数
     def build_tile_graph(self, map_features, relic_nodes, units, units_mask, sensor_range, team):
-        tile_type = np.array(map_features['tile_type'])
-        energy = np.array(map_features['energy'])
-        tile_type, energy = self.edit_map_features(tile_type, energy, units, units_mask, sensor_range, team)
-        tiles = np.concatenate([tile_type[..., np.newaxis], energy[..., np.newaxis]], axis=-1)
+        # タイルタイプとエネルギーを取得
+        tile_type = np.array(map_features['tile_type'])  # (24, 24)
+        energy = np.array(map_features['energy'])  # (24, 24)
+        tile_type, energy = self.edit_map_features(
+            np.array(map_features['tile_type']), 
+            np.array(map_features['energy']),
+            units,
+            units_mask,
+            sensor_range,
+            team
+        )
 
+        # Relic Nodeをタイルタイプに反映
         for pos in relic_nodes:
             x, y = pos
             if x == -1 or y == -1: continue
-            tiles[x, y, 0] = 3
+            tile_type[x, y] = 3  # Relic Nodeのラベルを3に設定
+            # 対称の位置にもrelic_nodeは存在
+            tile_type[23-y, 23-x] = 3
 
-        adversal_map = np.zeros_like(tile_type, dtype=np.float32)
-        adversal_indices = np.where(units_mask[1 - team])[0]
-        adversal_pos = np.array(units['position'][1 - team])[adversal_indices]
-        for pos in adversal_pos:
+        # タイルタイプをOne-Hotエンコード
+        num_tile_types = 4  # タイルタイプの種類数（0: 空白, 1: 星雲, 2: 小惑星, 3: Relic Node）
+        tile_type_onehot = np.eye(num_tile_types)[tile_type]  # (24, 24, num_tile_types)
+
+        # 敵ユニットの位置情報を追加
+        enemy_map = np.zeros_like(tile_type, dtype=np.float32)
+        indices = np.where(units_mask[1-team])[0]
+        enemy_positions = np.array(units['position'][1-team])[indices]
+        for pos in enemy_positions:  # 敵チームのユニット位置
             x, y = pos
-            adversal_map[x, y] += 1
+            enemy_map[x, y] += 1
 
-        tiles = np.concatenate([tiles, adversal_map[..., np.newaxis]], axis=-1)
+        # エネルギー情報と敵ユニット情報を結合
+        tiles = np.concatenate([
+            tile_type_onehot,  # (24, 24, num_tile_types)
+            energy[..., np.newaxis],  # (24, 24, 1)
+            enemy_map[..., np.newaxis]  # (24, 24, 1)
+        ], axis=-1)  # 最終形状: (24, 24, num_tile_types + 2)
+
+        # タイル特徴量を埋め込み
         embed_tile = self.tile_embedder(torch.tensor(tiles, dtype=torch.float32, device=self.device))
 
+        # チームのユニットごとにタイル特徴量を取得
         tile_features = []
-        team_indices = np.where(units_mask[team])[0]
-        team_pos = np.array(units['position'][team])[team_indices]
-        for pos in team_pos:
+        indices = np.where(units_mask[team])[0]
+        team_positions = np.array(units['position'][team])[indices]
+        for pos in team_positions:  # 敵チームのユニット位置
             x, y = pos
-            tile_features.append(embed_tile[x, y, :])
+            tile_features.append(embed_tile[x, y, :])  # 対応するタイルの特徴量を取得
 
-        return torch.stack(tile_features).to(self.device)
+        # 結果をスタックしてTensorで返す
+        return torch.stack(tile_features).to(self.device)          
 
     def build_unit_graph(self, units, units_mask, team):
         indices = np.where(units_mask[team])[0]
@@ -142,9 +167,8 @@ class Trainer:
 
                 unit_nodes, units_edges = self.build_unit_graph(units, units_mask, team)
                 tile_nodes = self.build_tile_graph(map_features, relic_nodes, units, units_mask, sensor_range, team)
-                input_nodes = torch.cat([unit_nodes, tile_nodes], dim=-1)
-
-                action_probs, action_values = self.imitator.forward(input_nodes, units_edges)
+                
+                action_probs, action_values = self.imitator.forward(unit_nodes, tile_nodes, units_edges)
                 selected_action_probs = action_probs.gather(1, sample_actions[:, 0].unsqueeze(1)).squeeze(1)
 
                 selected_action_values = action_values.gather(1, sample_actions[:, 0].unsqueeze(1)).squeeze(1)
@@ -177,19 +201,33 @@ class Trainer:
 
 if __name__ == "__main__":
     data_dir = 'dataset/train_rl'
-    model_dir = 'models/20250113_222631/step_10000'
+    model_dir = 'models/20250119_203638/step_90000'
     save_model_dir = f"models/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     log_dir = f"logs/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     os.makedirs(data_dir, exist_ok=True)
 
     # エピソードを10000step実行して保存
-    for ep in range(10):
-        path = os.path.join(data_dir, f'episode_{ep}.json')
-        # simulate
-        ret_code = os.system(f'luxai-s3 test_agent.py test_agent.py --output={path}') 
+    # for ep in range(20):
+    #     path = os.path.join(data_dir, f'episode_{ep}.json')
+    #     # simulate
+    #     ret_code = os.system(f'luxai-s3 test_agent.py test_agent.py --output={path}') 
 
     ep = 0
     for i in tqdm(range(1000), desc="Running Episodes", unit="episode"):
+        # training
+        config = {
+            'gamma': 0.99,
+            'num_learn': 100,
+            'batch_size': 32,
+            'num_steps': 100,
+            'data_dir': data_dir,
+            'load_model_dir': model_dir,
+            'save_model_dir': save_model_dir,
+            'log_dir': log_dir
+        }
+        trainer = Trainer(config)
+        model_dir = trainer.train()
+
         # overwrite test_agent.py
         test_agent_path = "test_agent.py"
         with open(test_agent_path, "r", encoding="utf-8") as f:
@@ -206,18 +244,3 @@ if __name__ == "__main__":
         ep += 1
         # simulate
         ret_code = os.system(f'luxai-s3 test_agent.py test_agent.py --output={path}') 
-        
-        # training
-        config = {
-            'gamma': 0.99,
-            'num_learn': 100,
-            'batch_size': 32,
-            'num_steps': 100,
-            'data_dir': data_dir,
-            'load_model_dir': model_dir,
-            'save_model_dir': os.path.join(save_model_dir, f'step_{i}'),
-            'log_dir': log_dir
-        }
-
-        trainer = Trainer(config)
-        model_dir = trainer.train()
